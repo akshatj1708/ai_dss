@@ -1,0 +1,15 @@
+pandas
+numpy
+matplotlib
+seaborn
+plotly
+fastapi
+uvicorn[standard]
+mistralai==0.4.2
+PyPDF2
+python-docx
+openpyxl
+Pillow
+pytesseract
+requests
+python-dotenv
