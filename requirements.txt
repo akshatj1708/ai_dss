@@ -13,3 +13,4 @@ Pillow
 pytesseract
 requests
 python-dotenv
+scipy

@@ -66,7 +66,29 @@ data-analyst-agent/
 ```bash
 uvicorn app:app --reload
 ```
-2. Access the API documentation at [http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs).
+2. Access the API documentation at [http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs) for a full list of endpoints.
+
+### Data Quality Analysis Workflow
+
+1.  **Upload Training Data**: Start a new session by uploading a training dataset.
+    ```bash
+    curl -X POST -F "file=@Datasets/your_training_data.csv" http://127.0.0.1:8000/upload/training/
+    ```
+2.  **Upload Testing Data (Optional)**: To perform distribution drift analysis, upload a testing dataset using the `session_id` from the previous step.
+    ```bash
+    curl -X POST -F "file=@Datasets/your_testing_data.csv" http://127.0.0.1:8000/upload/testing/{session_id}
+    ```
+3.  **Run Analysis**: Trigger the data quality analysis to get a full report.
+    ```bash
+    curl -X GET http://127.0.0.1:8000/analyze/quality/{session_id}
+    ```
+
+### Natural Language Queries
+
+You can still ask questions about your training dataset using the `/query/` endpoint.
+```bash
+curl -X POST -H "Content-Type: application/json" -d '{"session_id": "{session_id}", "query": "What is the average price?"}' http://127.0.0.1:8000/query/
+```
 ## Supported File Types 📄
 
 The agent can process various file formats:
