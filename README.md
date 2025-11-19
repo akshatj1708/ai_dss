@@ -68,19 +68,27 @@ uvicorn app:app --reload
 ```
 2. Access the API documentation at [http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs) for a full list of endpoints.
 
-### Data Quality Analysis Workflow
+### Full Workflow: Data Quality and Model Evaluation
 
-1.  **Upload Training Data**: Start a new session by uploading a training dataset.
+1.  **Upload Training Data**: Start a new session by uploading a training dataset. This will return a `session_id`.
     ```bash
     curl -X POST -F "file=@Datasets/your_training_data.csv" http://127.0.0.1:8000/upload/training/
     ```
-2.  **Upload Testing Data (Optional)**: To perform distribution drift analysis, upload a testing dataset using the `session_id` from the previous step.
+2.  **Upload Testing Data**: Upload a testing dataset to the same session using the `session_id`.
     ```bash
     curl -X POST -F "file=@Datasets/your_testing_data.csv" http://127.0.0.1:8000/upload/testing/{session_id}
     ```
-3.  **Run Analysis**: Trigger the data quality analysis to get a full report.
+3.  **Run Data Quality Analysis**: Get a report on schema, outliers, and distribution drift.
     ```bash
     curl -X GET http://127.0.0.1:8000/analyze/quality/{session_id}
+    ```
+4.  **Upload Trained Model**: Upload your trained and serialized (`.pkl`) model to the session.
+    ```bash
+    curl -X POST -F "file=@your_model.pkl" http://127.0.0.1:8000/upload/model/{session_id}
+    ```
+5.  **Evaluate Model Performance**: Trigger the performance evaluation with your desired benchmarks.
+    ```bash
+    curl -X POST -H "Content-Type: application/json" -d '{"model_version": "v1.0", "thresholds": {"accuracy": 0.85, "auc_roc": 0.90}}' http://127.0.0.1:8000/evaluate/performance/{session_id}
     ```
 
 ### Natural Language Queries

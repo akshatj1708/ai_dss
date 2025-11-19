@@ -14,3 +14,4 @@ pytesseract
 requests
 python-dotenv
 scipy
+scikit-learn
