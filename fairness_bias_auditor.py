@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from typing import Dict, Any, List, Union
 import pandas as pd
 import numpy as np
-from sklearn.metrics import accuracy_score, precision_score, recall_score
+from sklearn.metrics import accuracy_score, precision_score, recall_score, r2_score
 
 @dataclass
 class FairnessReport:
@@ -55,8 +55,9 @@ class FairnessAndBiasAuditing:
         self.X = X
         self.y_true = y_true
         self.sensitive_features = sensitive_features
+        self.is_classification = hasattr(model, 'predict_proba')
         
-        # Generate predictions if not provided
+        # Generate predictions
         self.y_pred = self.model.predict(X)
         
         # Set feature names or generate defaults
@@ -66,6 +67,17 @@ class FairnessAndBiasAuditing:
             self.sensitive_feature_names = sensitive_feature_names
         else:
             self.sensitive_feature_names = [f"sensitive_feature_{i}" for i in range(sensitive_features.shape[1])]
+    
+    def _prepare_binary_targets(self):
+        """Convert continuous targets to binary for fairness analysis if needed."""
+        if self.is_classification:
+            return self.y_true, self.y_pred
+        
+        # For regression, convert to binary using median as threshold
+        median = np.median(self.y_true)
+        y_true_bin = (self.y_true > median).astype(int)
+        y_pred_bin = (self.y_pred > median).astype(int)
+        return y_true_bin, y_pred_bin
     
     def calculate_bias_metrics(self, fairness_threshold: float = 0.8) -> Dict[str, Any]:
         """Calculate key fairness metrics.
@@ -82,16 +94,19 @@ class FairnessAndBiasAuditing:
                 equalized_odds_difference
             )
             
+            # Prepare binary targets for fairness metrics
+            y_true_bin, y_pred_bin = self._prepare_binary_targets()
+            
             # Calculate fairness metrics
             metrics = {
                 'demographic_parity': demographic_parity_difference(
-                    self.y_true, 
-                    self.y_pred, 
+                    y_true_bin, 
+                    y_pred_bin, 
                     sensitive_features=self.sensitive_features
                 ),
                 'equalized_odds': equalized_odds_difference(
-                    self.y_true, 
-                    self.y_pred,
+                    y_true_bin, 
+                    y_pred_bin,
                     sensitive_features=self.sensitive_features
                 )
             }
@@ -99,7 +114,7 @@ class FairnessAndBiasAuditing:
             # Check against thresholds (closer to 0 is better)
             metrics['is_fair'] = all(
                 abs(m) <= (1 - fairness_threshold) 
-                for m in metrics.values()
+                for m in metrics.values() if m is not None
             )
             
             return metrics
@@ -155,6 +170,17 @@ class FairnessAndBiasAuditing:
         sensitive_df['y_true'] = self.y_true
         sensitive_df['y_pred'] = self.y_pred
         
+        # For regression, create binary versions
+        if not self.is_classification:
+            median = np.median(self.y_true)
+            sensitive_df['y_true_bin'] = (sensitive_df['y_true'] > median).astype(int)
+            sensitive_df['y_pred_bin'] = (sensitive_df['y_pred'] > median).astype(int)
+            y_true_col = 'y_true_bin'
+            y_pred_col = 'y_pred_bin'
+        else:
+            y_true_col = 'y_true'
+            y_pred_col = 'y_pred'
+        
         subgroup_metrics = {}
         
         # Calculate metrics for each sensitive feature
@@ -162,14 +188,16 @@ class FairnessAndBiasAuditing:
             metrics = {}
             for group in sensitive_df[feature].unique():
                 mask = sensitive_df[feature] == group
-                y_true_group = sensitive_df.loc[mask, 'y_true']
-                y_pred_group = sensitive_df.loc[mask, 'y_pred']
+                y_true_group = sensitive_df.loc[mask, y_true_col]
+                y_pred_group = sensitive_df.loc[mask, y_pred_col]
                 
                 if len(y_true_group) > 0:  # Only calculate if group has samples
                     metrics[group] = {
                         'accuracy': accuracy_score(y_true_group, y_pred_group),
-                        'precision': precision_score(y_true_group, y_pred_group, average='weighted', zero_division=0),
-                        'recall': recall_score(y_true_group, y_pred_group, average='weighted', zero_division=0),
+                        'precision': precision_score(y_true_group, y_pred_group, 
+                                                  average='weighted', zero_division=0),
+                        'recall': recall_score(y_true_group, y_pred_group, 
+                                            average='weighted', zero_division=0),
                         'sample_size': len(y_true_group)
                     }
             
@@ -217,56 +245,3 @@ class FairnessAndBiasAuditing:
             )
         
         return " ".join(recommendations)
-
-# Example usage
-if __name__ == "__main__":
-    # Example with synthetic data
-    from sklearn.ensemble import RandomForestClassifier
-    
-    # Generate synthetic data
-    np.random.seed(42)
-    n_samples = 1000
-    
-    # Sensitive feature (e.g., gender)
-    gender = np.random.choice([0, 1], size=n_samples)  # 0: female, 1: male
-    
-    # Create synthetic features with some bias
-    X = np.random.randn(n_samples, 5)
-    X[:, 0] += gender * 0.5  # Introduce some bias
-    
-    # Generate labels with some bias
-    y = ((X[:, 0] + X[:, 1] * 0.5) > 0).astype(int)
-    
-    # Train a simple model
-    model = RandomForestClassifier(random_state=42)
-    model.fit(X, y)
-    
-    # Create auditor instance
-    auditor = FairnessAndBiasAuditing(
-        model=model,
-        X=X,
-        y_true=y,
-        sensitive_features=gender.reshape(-1, 1),
-        sensitive_feature_names=['gender']
-    )
-    
-    # Run audit
-    report = auditor.audit_fairness(fairness_threshold=0.8)
-    
-    # Print results
-    print("\nFairness Audit Results:")
-    print("-" * 30)
-    print(f"Demographic Parity: {report.overall_metrics['demographic_parity']:.4f}")
-    print(f"Equalized Odds: {report.overall_metrics['equalized_odds']:.4f}")
-    print(f"Is Fair: {report.overall_metrics['is_fair']}")
-    print("\nSubgroup Analysis:")
-    for feature, groups in report.subgroup_analysis.items():
-        print(f"\n{feature}:")
-        for group, metrics in groups.items():
-            print(f"  {group}: Accuracy={metrics['accuracy']:.3f}, "
-                  f"Precision={metrics['precision']:.3f}, "
-                  f"Recall={metrics['recall']:.3f}, "
-                  f"n={metrics['sample_size']}")
-    
-    print("\nRecommendations:")
-    print(report.recommendations)

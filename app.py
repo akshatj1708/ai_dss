@@ -2,8 +2,9 @@ import os
 import uuid
 import pickle
 from fastapi import FastAPI, File, UploadFile, HTTPException
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
-from typing import Dict
+from typing import Dict,List, Optional,Any
 from dotenv import load_dotenv
 from agent_core import IntelligentAgent
 from file_processor import FileProcessor
@@ -11,8 +12,9 @@ from data_preprocessor import DataPreprocessor
 from data_quality_analyzer import DataQualityAnalyzer
 from model_performance_evaluator import ModelPerformanceEvaluator
 import pandas as pd
-from typing import List, Optional
 from pydantic import BaseModel
+from robustness_tester import RobustnessTester
+from fairness_bias_auditor import FairnessAndBiasAuditing
 
 # Load environment variables
 env_path = "Configs/.env"
@@ -34,10 +36,6 @@ app = FastAPI(
 # Session management
 sessions = {}
 
-class FairnessAuditRequest(BaseModel):
-    sensitive_columns: List[str]
-    fairness_threshold: float = 0.8
-
 class Query(BaseModel):
     session_id: str
     query: str
@@ -45,6 +43,17 @@ class Query(BaseModel):
 class EvaluationRequest(BaseModel):
     model_version: str
     thresholds: Dict[str, float]
+
+class FairnessAuditRequest(BaseModel):
+    sensitive_columns: List[str]
+    fairness_threshold: float = 0.8
+
+class RobustnessTestRequest(BaseModel):
+    attack_types: List[str] = ['fgsm']
+    noise_types: List[str] = ['gaussian']
+    eps_values: List[float] = [0.01, 0.05, 0.1]
+    noise_levels: List[float] = [0.05, 0.1, 0.2]
+    model_type: str = 'sklearn'  # 'sklearn', 'pytorch', 'tensorflow'
 
 def _process_and_store_dataset(session_id: str, file: UploadFile, dataset_type: str):
     file_path = os.path.join("Datasets", file.filename)
@@ -183,12 +192,109 @@ def evaluate_performance(session_id: str, request: EvaluationRequest):
     sessions[session_id]['last_report'] = report
     return report
 
-@app.post("/audit/fairness/{session_id}", summary="Perform fairness audit on model predictions")
+@app.post("/audit/fairness/{session_id}", response_model=Dict[str, Any])
 async def audit_fairness(
     session_id: str,
     request: FairnessAuditRequest
 ):
-    """Run fairness audit on the model and data in the session."""
+    """Run fairness audit on the model in the specified session."""
+    if session_id not in sessions:
+        raise HTTPException(status_code=404, detail="Session not found")
+    
+    session = sessions[session_id]
+    model = session.get('model')
+    data = session.get('training_data')  
+    
+    if model is None or data is None:
+        raise HTTPException(
+            status_code=400, 
+            detail="Model and training data are required for fairness audit"
+        )
+    
+    try:
+        # Check if all sensitive columns exist
+        missing_columns = set(request.sensitive_columns) - set(data.columns)
+        if missing_columns:
+            raise HTTPException(
+                status_code=400,
+                detail=f"columns are missing: {missing_columns}"
+            )
+        
+        X = data.drop(columns=[data.columns[-1]])  # Drop target column
+        y = data[data.columns[-1]]  # Last column is target
+        
+        # Get only the sensitive features from X
+        sensitive_features = X[request.sensitive_columns]
+        
+        # Initialize fairness auditor with the actual feature values
+        auditor = FairnessAndBiasAuditing(
+            model=model,
+            X=X,
+            y_true=y,
+            sensitive_features=sensitive_features  # Pass the actual feature values
+        )
+        
+        # Run fairness audit
+        report = auditor.audit_fairness(
+            fairness_threshold=request.fairness_threshold
+        )
+        
+        def convert_numpy_types(obj):
+            """Recursively convert numpy types to native Python types for JSON serialization."""
+            import numpy as np
+            from numpy import integer, floating, bool_
+            
+            # Handle dictionary keys first
+            if isinstance(obj, dict):
+                return {
+                    str(k) if isinstance(k, (integer, floating, bool_, np.number)) else k: convert_numpy_types(v)
+                    for k, v in obj.items()
+                }
+            # Handle numpy types
+            elif isinstance(obj, (integer, np.integer)):
+                return int(obj)
+            elif isinstance(obj, (floating, np.floating)):
+                return float(obj)
+            elif isinstance(obj, (bool_, np.bool_)):
+                return bool(obj)
+            elif isinstance(obj, np.ndarray):
+                return obj.tolist()
+            # Handle sequences
+            elif isinstance(obj, (list, tuple)):
+                return [convert_numpy_types(x) for x in obj]
+            # Handle objects with __dict__ attribute
+            elif hasattr(obj, '__dict__'):
+                return convert_numpy_types(vars(obj))
+            # Handle numpy scalars
+            elif hasattr(obj, 'item'):
+                return obj.item()
+            return obj
+
+        report_dict = {
+            "fairness_metrics": convert_numpy_types(report.overall_metrics),
+            "subgroup_analysis": convert_numpy_types(report.subgroup_analysis),
+            "recommendations": convert_numpy_types(report.recommendations)
+        }
+        
+        # Return as JSONResponse to bypass FastAPI's serialization
+        return JSONResponse(content=report_dict)
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        traceback.print_exc()  # This will print the full traceback
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error during fairness audit: {str(e)}"
+        )
+
+@app.post("/test/robustness/{session_id}", response_model=Dict[str, Any])
+async def test_robustness(
+    session_id: str,
+    request: RobustnessTestRequest
+):
+    """Run robustness tests on the model in the specified session."""
     if session_id not in sessions:
         raise HTTPException(status_code=404, detail="Session not found")
     
@@ -199,52 +305,55 @@ async def audit_fairness(
     if model is None or testing_data is None:
         raise HTTPException(
             status_code=400, 
-            detail="Model and test data are required for fairness audit"
+            detail="Model and test data are required for robustness testing"
         )
     
-    # Extract sensitive features
-    sensitive_cols = [col for col in request.sensitive_columns if col in testing_data.columns]
-    if not sensitive_cols:
-        raise HTTPException(
-            status_code=400,
-            detail="No valid sensitive columns found in test data"
-        )
-    
-    # Get target column (assuming it's the last column, adjust if needed)
-    X_test = testing_data.iloc[:, :-1]
-    y_test = testing_data.iloc[:, -1]
-    
-    # Initialize auditor
     try:
-        from fairness_bias_auditor import FairnessAndBiasAuditing
+        # Get feature ranges for normalization
+        X_test = testing_data.iloc[:, :-1]  # Features
+        y_test = testing_data.iloc[:, -1]   # Target
         
-        auditor = FairnessAndBiasAuditing(
+        # Convert categorical columns to numeric codes
+        X_test_processed = X_test.copy()
+        for col in X_test_processed.select_dtypes(include=['category', 'object']).columns:
+            X_test_processed[col] = X_test_processed[col].astype('category').cat.codes
+            
+        # Get min/max of processed numeric data
+        feature_ranges = (float(X_test_processed.min().min()), float(X_test_processed.max().max()))
+        
+        # Initialize tester with processed data
+        tester = RobustnessTester(
             model=model,
-            X=X_test,
-            y_true=y_test,
-            sensitive_features=X_test[sensitive_cols].values,
-            sensitive_feature_names=sensitive_cols
+            X_test=X_test_processed,
+            y_test=y_test,
+            model_type="regression",  # Explicitly set to regression
+            feature_ranges=feature_ranges
         )
         
-        # Run audit
-        report = auditor.audit_fairness(fairness_threshold=request.fairness_threshold)
+        # Run tests
+        report = tester.measure_robustness(
+            attack_types=[],  # Skip adversarial attacks for regression
+            noise_types=request.noise_types,
+            eps_values=request.eps_values,
+            noise_levels=request.noise_levels
+        )
         
         # Convert report to dict for JSON serialization
         return {
-            "fairness_metrics": report.overall_metrics,
-            "subgroup_analysis": report.subgroup_analysis,
+            "original_accuracy": report.original_accuracy,
+            "adversarial_accuracy": report.adversarial_accuracy,
+            "noise_robustness_score": report.noise_robustness_score,
+            "vulnerability_insights": report.vulnerability_insights,
+            "robustness_metrics": report.robustness_metrics,
             "recommendations": report.recommendations
         }
         
-    except ImportError as e:
+    except Exception as e:
         raise HTTPException(
             status_code=500,
-            detail="Fairness auditing requires fairlearn. Install with: pip install fairlearn"
+            detail=f"Error during robustness testing: {str(e)}"
         )
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
 
-    
 @app.post("/query/", summary="Process a user query on the training dataset")
 def process_query(query: Query):
     if query.session_id not in sessions or 'agent' not in sessions[query.session_id]:
