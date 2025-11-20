@@ -1,7 +1,7 @@
 import os
 import uuid
 import pickle
-from fastapi import FastAPI, File, UploadFile, HTTPException
+from fastapi import FastAPI, File, UploadFile, HTTPException,BackgroundTasks
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from typing import Dict,List, Optional,Any
@@ -15,6 +15,10 @@ import pandas as pd
 from pydantic import BaseModel
 from robustness_tester import RobustnessTester
 from fairness_bias_auditor import FairnessAndBiasAuditing
+import logging
+import numpy as np
+
+logger = logging.getLogger(__name__)
 
 # Load environment variables
 env_path = "Configs/.env"
@@ -289,85 +293,120 @@ async def audit_fairness(
             detail=f"Error during fairness audit: {str(e)}"
         )
 
-@app.post("/test/robustness/{session_id}", response_model=Dict[str, Any])
+@app.post("/test/robustness/{session_id}")
 async def test_robustness(
     session_id: str,
-    request: RobustnessTestRequest
+    request: RobustnessTestRequest,
+    background_tasks: BackgroundTasks
 ):
-    """Run robustness tests on the model in the specified session."""
-    if session_id not in sessions:
-        raise HTTPException(status_code=404, detail="Session not found")
-    
-    session = sessions[session_id]
-    model = session.get('model')
-    testing_data = session.get('testing_data')
-    
-    if model is None or testing_data is None:
-        raise HTTPException(
-            status_code=400, 
-            detail="Model and test data are required for robustness testing"
-        )
-    
     try:
-        # Get feature ranges for normalization
-        X_test = testing_data.iloc[:, :-1]  # Features
-        y_test = testing_data.iloc[:, -1]   # Target
+        if session_id not in sessions:
+            raise HTTPException(status_code=404, detail="Session not found")
         
-        # Convert categorical columns to numeric codes
-        X_test_processed = X_test.copy()
-        for col in X_test_processed.select_dtypes(include=['category', 'object']).columns:
-            X_test_processed[col] = X_test_processed[col].astype('category').cat.codes
+        session = sessions[session_id]
+        model = session.get('model')
+        X_test = session.get('testing_data')
+        preprocessor = session.get('preprocessor')
+        
+        if model is None or X_test is None:
+            raise HTTPException(status_code=400, detail="Model or test data not found in session")
+        
+        try:
+            # Get target column from session or use the last column as default
+            target_column = session.get('target_column', X_test.columns[-1])
+            y_test = X_test[target_column].values
+            X_test = X_test.drop(columns=[target_column])
             
-        # Get min/max of processed numeric data
-        feature_ranges = (float(X_test_processed.min().min()), float(X_test_processed.max().max()))
-        
-        # Initialize tester with processed data
-        tester = RobustnessTester(
-            model=model,
-            X_test=X_test_processed,
-            y_test=y_test,
-            model_type="regression",  # Explicitly set to regression
-            feature_ranges=feature_ranges
-        )
-        
-        # Run tests
-        report = tester.measure_robustness(
-            attack_types=[],  # Skip adversarial attacks for regression
-            noise_types=request.noise_types,
-            eps_values=request.eps_values,
-            noise_levels=request.noise_levels
-        )
-        
-        # Convert report to dict for JSON serialization
-        return {
-            "original_accuracy": report.original_accuracy,
-            "adversarial_accuracy": report.adversarial_accuracy,
-            "noise_robustness_score": report.noise_robustness_score,
-            "vulnerability_insights": report.vulnerability_insights,
-            "robustness_metrics": report.robustness_metrics,
-            "recommendations": report.recommendations
-        }
-        
+            logger.info(f"Raw test data columns: {X_test.columns.tolist()}")
+            logger.info(f"Raw test data shape: {X_test.shape}")
+            
+            # Apply the same preprocessing used during training
+            if preprocessor is not None:
+                try:
+                    # Get the expected feature names from the preprocessor
+                    if hasattr(preprocessor, 'get_feature_names_out'):
+                        expected_features = preprocessor.get_feature_names_out()
+                        logger.info(f"Preprocessor expects features: {expected_features.tolist()}")
+                    
+                    # Get the actual features in the test data
+                    actual_features = X_test.columns.tolist()
+                    logger.info(f"Actual features: {actual_features}")
+                    
+                    # If the model is a pipeline, get the preprocessor from the pipeline
+                    if hasattr(model, 'steps'):
+                        for name, step in model.steps:
+                            if hasattr(step, 'transform') and hasattr(step, 'fit_transform'):
+                                preprocessor = step
+                                logger.info(f"Found preprocessor in model pipeline: {name}")
+                                break
+                    
+                    # Transform the test data
+                    X_test_processed = preprocessor.transform(X_test)
+                    logger.info(f"Preprocessed test data shape: {getattr(X_test_processed, 'shape', 'N/A')}")
+                    
+                except Exception as e:
+                    logger.error(f"Error during preprocessing: {str(e)}", exc_info=True)
+                    if hasattr(preprocessor, 'get_feature_names_out'):
+                        logger.error(f"Expected features: {preprocessor.get_feature_names_out().tolist()}")
+                    logger.error(f"Actual features: {X_test.columns.tolist()}")
+                    if hasattr(preprocessor, 'transformers_'):
+                        for name, transformer, columns in preprocessor.transformers_:
+                            logger.error(f"Transformer '{name}' processes columns: {columns}")
+                    raise ValueError(
+                        f"Preprocessing failed: {str(e)}\n"
+                        f"Expected {getattr(preprocessor, 'n_features_in_', 'unknown')} features, got {X_test.shape[1]}\n"
+                        f"Input columns: {X_test.columns.tolist()}"
+                    )
+                
+                # If we have a sparse matrix, convert to dense for ART
+                if hasattr(X_test_processed, 'toarray'):
+                    X_test_processed = X_test_processed.toarray()
+            else:
+                # Fallback: Use the model's predict method directly if no preprocessor is available
+                X_test_processed = X_test.values
+                logger.info(f"Using raw test data (no preprocessor): {X_test_processed.shape}")
+            
+            # Get feature ranges for scaling
+            if hasattr(X_test_processed, 'shape'):
+                logger.info(f"Final test data shape: {X_test_processed.shape}")
+                if isinstance(X_test_processed, np.ndarray):
+                    feature_ranges = (float(np.nanmin(X_test_processed)), 
+                                    float(np.nanmax(X_test_processed)))
+                elif hasattr(X_test_processed, 'min') and hasattr(X_test_processed, 'max'):
+                    feature_ranges = (float(X_test_processed.min().min()), 
+                                    float(X_test_processed.max().max()))
+                else:
+                    feature_ranges = (0.0, 1.0)
+            else:
+                feature_ranges = (0.0, 1.0)
+                
+            # Initialize robustness tester with task_type from request
+            tester = RobustnessTester(
+                model=model,
+                X_test=X_test_processed,
+                y_test=y_test,
+                model_type='sklearn',
+                task_type=request.model_type,
+                feature_ranges=feature_ranges
+            )
+            
+            # Run robustness tests
+            report = tester.measure_robustness(
+                attack_types=request.attack_types,
+                noise_types=request.noise_types,
+                noise_levels=request.noise_levels
+            )
+            
+            # Convert NumPy types to native Python types for JSON serialization
+            report_dict = convert_numpy_types(report.__dict__)
+            return report_dict
+            
+        except Exception as e:
+            logger.error(f"Error during robustness testing: {str(e)}", exc_info=True)
+            raise HTTPException(status_code=500, detail=f"Error during robustness testing: {str(e)}")
+            
+    except HTTPException:
+        raise
     except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Error during robustness testing: {str(e)}"
-        )
-
-@app.post("/query/", summary="Process a user query on the training dataset")
-def process_query(query: Query):
-    if query.session_id not in sessions or 'agent' not in sessions[query.session_id]:
-        raise HTTPException(status_code=404, detail="Session not found")
-
-    agent = sessions[query.session_id]['agent']
-    agent.context_manager.current_data = sessions[query.session_id]['training_data']
-    try:
-        response = agent.process_query(query.query)
-        return response
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error processing query: {str(e)}")
-
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
- 
+        logger.error(f"Unexpected error in test_robustness: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"An unexpected error occurred: {str(e)}")

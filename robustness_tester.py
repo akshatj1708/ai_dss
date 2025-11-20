@@ -7,46 +7,42 @@ and noisy inputs using the Adversarial Robustness Toolbox (ART).
 
 import numpy as np
 from typing import Dict, List, Any, Tuple, Union, Optional
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import logging
-from sklearn.metrics import accuracy_score
+from sklearn.metrics import accuracy_score, r2_score, mean_squared_error
 import pandas as pd
 
+# Remove the entire try-except block and replace with this:
 try:
-    from art.estimators.classification import SklearnClassifier, PyTorchClassifier, TensorFlowClassifier
+    from art.estimators.classification import SklearnClassifier, PyTorchClassifier, TensorFlowV2Classifier
+    from art.estimators.regression import ScikitlearnRegressor, PyTorchRegressor
     from art.attacks.evasion import FastGradientMethod, ProjectedGradientDescent, CarliniL2Method
     from art.defences.preprocessor import FeatureSqueezing, GaussianAugmentation
     from art.metrics import clever_u
+    ART_AVAILABLE = True
 except ImportError:
-    print("Adversarial Robustness Toolbox (ART) not found. Install with: pip install adversarial-robustness-toolbox")
+    ART_AVAILABLE = False
 
 # Configure logging
-logging.basicConfig(level=logging.INFO)
+import logging
 logger = logging.getLogger(__name__)
 
 @dataclass
 class RobustnessReport:
     """
     Container for robustness testing results.
-    
-    Attributes:
-        original_accuracy: Accuracy on clean test data
-        adversarial_accuracy: Accuracy on adversarial examples
-        noise_robustness_score: Score (0-1) indicating robustness to noise
-        vulnerability_insights: List of identified vulnerabilities
-        robustness_metrics: Dictionary of various robustness metrics
-        recommendations: List of improvement suggestions
     """
     original_accuracy: float
-    adversarial_accuracy: float
-    noise_robustness_score: float
-    vulnerability_insights: List[str]
-    robustness_metrics: Dict[str, float]
-    recommendations: List[str]
+    adversarial_accuracy: Dict[str, float] = field(default_factory=dict)
+    noise_robustness_score: float = 0.0
+    vulnerability_insights: List[str] = field(default_factory=list)
+    robustness_metrics: Dict[str, Any] = field(default_factory=dict)
+    recommendations: List[str] = field(default_factory=list)
 
 class RobustnessTester:
     """
     Class for testing model robustness against adversarial attacks and noise.
+    Supports both classification and regression models.
     """
     
     def __init__(
@@ -55,9 +51,15 @@ class RobustnessTester:
         X_test: Union[np.ndarray, pd.DataFrame],
         y_test: Union[np.ndarray, pd.Series],
         model_type: str = 'sklearn',  # 'sklearn', 'pytorch', 'tensorflow'
+        task_type: str = 'classification',  # 'classification' or 'regression'
         feature_ranges: Optional[Tuple[float, float]] = None,
         **kwargs
     ):
+        if not ART_AVAILABLE:
+            raise ImportError(
+                "Adversarial Robustness Toolbox (ART) is required but not installed. "
+                "Install with: pip install adversarial-robustness-toolbox"
+            )
         """
         Initialize the robustness tester.
         
@@ -66,14 +68,16 @@ class RobustnessTester:
             X_test: Test features (numpy array or pandas DataFrame)
             y_test: Test labels (numpy array or pandas Series)
             model_type: Type of model ('sklearn', 'pytorch', 'tensorflow')
+            task_type: Type of task ('classification' or 'regression')
             feature_ranges: Tuple of (min, max) values for feature scaling
             **kwargs: Additional model-specific parameters
         """
         self.model = model
         self.X_test = X_test.values if isinstance(X_test, pd.DataFrame) else X_test
         self.y_test = y_test.values if hasattr(y_test, 'values') else y_test
-        self.model_type = model_type
-        self.feature_ranges = feature_ranges or (self.X_test.min(), self.X_test.max())
+        self.model_type = model_type.lower()
+        self.task_type = task_type.lower()
+        self.feature_ranges = feature_ranges or (float(self.X_test.min()), float(self.X_test.max()))
         self.art_model = self._wrap_model(**kwargs)
         
         # Initialize results
@@ -83,55 +87,70 @@ class RobustnessTester:
         self.attack_success_rates = {}
         
     def _wrap_model(self, **kwargs) -> Any:
-        """Wrap the model for use with ART."""
-        if self.model_type.lower() == 'sklearn':
-            return self._wrap_sklearn_model(**kwargs)
-        elif self.model_type.lower() == 'pytorch':
-            return self._wrap_pytorch_model(**kwargs)
-        elif self.model_type.lower() == 'tensorflow':
-            return self._wrap_tensorflow_model(**kwargs)
+        """Wrap the model for use with ART based on model and task type."""
+        if self.task_type == 'classification':
+            return self._wrap_classification_model(**kwargs)
+        elif self.task_type == 'regression':
+            return self._wrap_regression_model(**kwargs)
         else:
-            raise ValueError(f"Unsupported model type: {self.model_type}")
+            raise ValueError(f"Unsupported task type: {self.task_type}. Use 'classification' or 'regression'")
     
-    def _wrap_sklearn_model(self, **kwargs) -> 'SklearnClassifier':
-        """Wrap a scikit-learn model for ART."""
-        from art.estimators.classification import SklearnClassifier
-        return SklearnClassifier(
-            model=self.model,
-            clip_values=self.feature_ranges,
-            **kwargs
-        )
-    
-    def _wrap_pytorch_model(self, **kwargs) -> 'PyTorchClassifier':
-        """Wrap a PyTorch model for ART."""
-        import torch
-        from art.estimators.classification import PyTorchClassifier
-        
-        if not hasattr(self.model, 'forward'):
-            raise ValueError("PyTorch model must have a 'forward' method")
+    def _wrap_classification_model(self, **kwargs) -> Any:
+        """Wrap a classification model for ART."""
+        if self.model_type == 'sklearn':
+            from art.estimators.classification import SklearnClassifier
+            return SklearnClassifier(
+                model=self.model,
+                clip_values=self.feature_ranges,
+                **kwargs
+            )
+        elif self.model_type == 'pytorch':
+            import torch
+            from art.estimators.classification import PyTorchClassifier
+            return PyTorchClassifier(
+                model=self.model,
+                clip_values=self.feature_ranges,
+                loss=torch.nn.CrossEntropyLoss(),
+                optimizer=torch.optim.Adam(self.model.parameters()),
+                input_shape=self.X_test.shape[1:],
+                nb_classes=len(np.unique(self.y_test)),
+                **kwargs
+            )
+        elif self.model_type == 'tensorflow':
+            from art.estimators.classification import TensorFlowV2Classifier
+            return TensorFlowV2Classifier(
+                model=self.model,
+                clip_values=self.feature_ranges,
+                nb_classes=len(np.unique(self.y_test)),
+                input_shape=self.X_test.shape[1:],
+                **kwargs
+            )
+        else:
+            raise ValueError(f"Unsupported model type for classification: {self.model_type}")
+
+    def _wrap_regression_model(self, **kwargs) -> Any:
+        """Wrap a regression model for ART."""
+        if self.model_type == 'sklearn':
+            from art.estimators.regression import ScikitlearnRegressor
+            return ScikitlearnRegressor(
+                model=self.model,
+                clip_values=self.feature_ranges,
+                **kwargs
+            )
+        elif self.model_type == 'pytorch':
+            import torch
+            from art.estimators.regression import PyTorchRegressor
+            return PyTorchRegressor(
+                model=self.model,
+                clip_values=self.feature_ranges,
+                loss=torch.nn.MSELoss(),
+                optimizer=torch.optim.Adam(self.model.parameters()),
+                input_shape=self.X_test.shape[1:],
+                **kwargs
+            )
+        else:
+            raise ValueError(f"Unsupported model type for regression: {self.model_type}")
             
-        return PyTorchClassifier(
-            model=self.model,
-            clip_values=self.feature_ranges,
-            loss=torch.nn.CrossEntropyLoss(),
-            optimizer=torch.optim.Adam(self.model.parameters()),
-            input_shape=self.X_test.shape[1:],
-            nb_classes=len(np.unique(self.y_test)),
-            **kwargs
-        )
-    
-    def _wrap_tensorflow_model(self, **kwargs) -> 'TensorFlowClassifier':
-        """Wrap a TensorFlow/Keras model for ART."""
-        from art.estimators.classification import TensorFlowV2Classifier
-        
-        return TensorFlowV2Classifier(
-            model=self.model,
-            clip_values=self.feature_ranges,
-            nb_classes=len(np.unique(self.y_test)),
-            input_shape=self.X_test.shape[1:],
-            **kwargs
-        )
-    
     def generate_adversarial_samples(
         self,
         attack_type: str = 'fgsm',
@@ -149,6 +168,10 @@ class RobustnessTester:
         Returns:
             Tuple of (adversarial_examples, success_rate)
         """
+        if self.task_type == 'regression':
+            logger.warning("Adversarial attacks are not well-defined for regression models. Using noise injection instead.")
+            return self.inject_noise('gaussian', eps), 0.0
+
         # Get clean predictions
         self.original_predictions = self.art_model.predict(self.X_test)
         
@@ -206,7 +229,6 @@ class RobustnessTester:
                 size=self.X_test.shape
             ) * (self.feature_ranges[1] - self.feature_ranges[0])
         elif noise_type == 'salt_pepper':
-            # For salt and pepper noise, we need to handle binary/categorical features
             salt = np.random.random(self.X_test.shape) < (noise_level / 2)
             pepper = np.random.random(self.X_test.shape) < (noise_level / 2)
             noise = salt.astype(float) - pepper.astype(float)
@@ -222,10 +244,28 @@ class RobustnessTester:
         
         return self.noisy_samples
     
-    def measure_robustness(self, attack_types=None, noise_types=None, eps_values=None, noise_levels=None):
-        """Measure model robustness against various attacks and noise."""
+    def measure_robustness(
+        self,
+        attack_types: List[str] = None,
+        noise_types: List[str] = None,
+        eps_values: List[float] = None,
+        noise_levels: List[float] = None
+    ) -> RobustnessReport:
+        """
+        Measure model robustness against various attacks and noise.
+        
+        Args:
+            attack_types: List of attack types to test
+            noise_types: List of noise types to test
+            eps_values: List of epsilon values for attacks
+            noise_levels: List of noise levels for noise injection
+            
+        Returns:
+            RobustnessReport containing test results
+        """
+        # Set default values if not provided
         if attack_types is None:
-            attack_types = ['fgsm', 'pgd']
+            attack_types = ['fgsm', 'pgd'] if self.task_type == 'classification' else []
         if noise_types is None:
             noise_types = ['gaussian', 'uniform']
         if eps_values is None:
@@ -234,50 +274,59 @@ class RobustnessTester:
             noise_levels = [0.05, 0.1, 0.2]
 
         try:
-            # Convert data to numpy if they're pandas DataFrames/Series
-            if hasattr(self.X_test, 'values'):
-                X_test = self.X_test.values
-            else:
-                X_test = self.X_test
-
-            if hasattr(self.y_test, 'values'):
-                y_test = self.y_test.values
-            else:
-                y_test = self.y_test
-
-            # Calculate original accuracy (R² score for regression)
-            y_pred = self.model.predict(X_test)
-            original_accuracy = self.model.score(X_test, y_test)  # R² score for regression
+            # Calculate original score
+            y_pred = self.model.predict(self.X_test)
+            if self.task_type == 'classification':
+                original_score = accuracy_score(self.y_test, y_pred)
+            else:  # regression
+                original_score = r2_score(self.y_test, y_pred)
 
             # Initialize results
-            adversarial_accuracy = {}
-            noise_robustness = {}
+            adversarial_scores = {}
+            noise_robustness = {noise_type: {} for noise_type in noise_types}
             vulnerability_insights = []
-            robustness_metrics = {}
+            robustness_metrics = {
+                'task_type': self.task_type,
+                'feature_ranges': self.feature_ranges
+            }
             recommendations = []
 
-            # Skip adversarial attacks for regression models
-            if hasattr(self.model, 'predict_proba'):  # Only for classifiers
-                # Adversarial testing code for classifiers...
-                pass
+            # Adversarial testing (only for classification)
+            if self.task_type == 'classification' and attack_types:
+                for attack_type in attack_types:
+                    for eps in eps_values:
+                        try:
+                            _, success_rate = self.generate_adversarial_samples(
+                                attack_type=attack_type,
+                                eps=eps
+                            )
+                            adversarial_scores[f"{attack_type}_eps{eps}"] = 1 - success_rate
+                        except Exception as e:
+                            logger.warning(f"Failed to generate {attack_type} attack with eps={eps}: {str(e)}")
+                            adversarial_scores[f"{attack_type}_eps{eps}"] = 0.0
             else:
-                vulnerability_insights.append("Adversarial attacks are not supported for regression models.")
-                recommendations.append("Consider using a classification model for adversarial robustness testing.")
+                vulnerability_insights.append(
+                    "Adversarial attacks are not performed (only supported for classification models)."
+                )
 
             # Noise injection testing
             for noise_type in noise_types:
-                noise_robustness[noise_type] = {}
                 for level in noise_levels:
-                    X_noisy = self._inject_noise(X_test.copy(), noise_type, level)
-                    if hasattr(self.model, 'predict_proba'):  # Classifier
+                    try:
+                        X_noisy = self.inject_noise(noise_type, level)
                         y_pred_noisy = self.model.predict(X_noisy)
-                        acc = accuracy_score(y_test, y_pred_noisy)
-                    else:  # Regressor
-                        y_pred_noisy = self.model.predict(X_noisy)
-                        acc = r2_score(y_test, y_pred_noisy)
-                    noise_robustness[noise_type][str(level)] = acc
+                        
+                        if self.task_type == 'classification':
+                            score = accuracy_score(self.y_test, y_pred_noisy)
+                        else:  # regression
+                            score = r2_score(self.y_test, y_pred_noisy)
+                            
+                        noise_robustness[noise_type][str(level)] = score
+                    except Exception as e:
+                        logger.warning(f"Failed to test with {noise_type} noise (level={level}): {str(e)}")
+                        noise_robustness[noise_type][str(level)] = 0.0
 
-            # Calculate overall noise robustness score (average across all noise types/levels)
+            # Calculate overall noise robustness score
             if noise_robustness:
                 all_scores = [score for noise_scores in noise_robustness.values() 
                             for score in noise_scores.values()]
@@ -286,17 +335,17 @@ class RobustnessTester:
                 noise_robustness_score = 0.0
 
             # Generate insights and recommendations
-            if not vulnerability_insights:  # If no insights were added (e.g., for classifiers)
-                if 'adversarial_accuracy' in locals() and adversarial_accuracy:
-                    avg_adv_acc = sum(adversarial_accuracy.values()) / len(adversarial_accuracy)
-                    if avg_adv_acc < 0.7 * original_accuracy:
+            if self.task_type == 'classification':
+                if adversarial_scores:
+                    avg_adv_score = sum(adversarial_scores.values()) / len(adversarial_scores)
+                    if avg_adv_score < 0.7 * original_score:
                         vulnerability_insights.append("Model shows significant vulnerability to adversarial attacks.")
                         recommendations.append("Consider implementing adversarial training or using a more robust model architecture.")
                     else:
                         vulnerability_insights.append("Model shows reasonable resistance to adversarial attacks.")
 
             # Add noise-related insights
-            if noise_robustness_score < 0.7 * original_accuracy:
+            if noise_robustness_score < 0.7 * original_score:
                 vulnerability_insights.append("Model is sensitive to input noise.")
                 recommendations.append("Consider adding noise to the training data to improve robustness.")
             else:
@@ -305,22 +354,22 @@ class RobustnessTester:
             if not recommendations:
                 recommendations.append("No specific recommendations. Model shows good robustness properties.")
 
-            # Create robustness metrics
-            robustness_metrics = {
-                'original_r2': original_accuracy,
+            # Update robustness metrics
+            robustness_metrics.update({
+                'original_score': original_score,
                 'noise_robustness': noise_robustness,
-                'is_regression': not hasattr(self.model, 'predict_proba')
-            }
+                'adversarial_scores': adversarial_scores if self.task_type == 'classification' else None
+            })
 
             return RobustnessReport(
-                original_accuracy=original_accuracy,
-                adversarial_accuracy=adversarial_accuracy,
-                noise_robustness_score=noise_robustness_score,
+                original_accuracy=float(original_score),
+                adversarial_accuracy=adversarial_scores,
+                noise_robustness_score=float(noise_robustness_score),
                 vulnerability_insights=vulnerability_insights,
                 robustness_metrics=robustness_metrics,
                 recommendations=recommendations
             )
 
         except Exception as e:
-            print(f"Error in measure_robustness: {str(e)}")
+            logger.error(f"Error in measure_robustness: {str(e)}", exc_info=True)
             raise
