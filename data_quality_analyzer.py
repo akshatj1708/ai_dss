@@ -60,12 +60,19 @@ class DataQualityAnalyzer:
             return "Skipping distribution drift: No test dataset provided."
 
         drift_results = {}
+        drifted_columns = []
+        
         for col in self.df_train.columns:
             if pd.api.types.is_numeric_dtype(self.df_train[col]):
                 stat, p_value = ks_2samp(self.df_train[col], self.df_test[col])
                 drift_results[col] = {'type': 'numeric', 'p_value': p_value, 'drift': bool(p_value < 0.05)}
+                if p_value < 0.05:
+                    drifted_columns.append(col)
             else:
                 contingency_table = pd.crosstab(self.df_train[col], self.df_test[col])
                 chi2, p_value, _, _ = chi2_contingency(contingency_table)
                 drift_results[col] = {'type': 'categorical', 'p_value': p_value, 'drift': bool(p_value < 0.05)}
+                if p_value < 0.05:
+                    drifted_columns.append(col)
+        
         return drift_results

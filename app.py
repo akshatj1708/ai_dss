@@ -11,6 +11,8 @@ from data_preprocessor import DataPreprocessor
 from data_quality_analyzer import DataQualityAnalyzer
 from model_performance_evaluator import ModelPerformanceEvaluator
 import pandas as pd
+from typing import List, Optional
+from pydantic import BaseModel
 
 # Load environment variables
 env_path = "Configs/.env"
@@ -31,6 +33,10 @@ app = FastAPI(
 
 # Session management
 sessions = {}
+
+class FairnessAuditRequest(BaseModel):
+    sensitive_columns: List[str]
+    fairness_threshold: float = 0.8
 
 class Query(BaseModel):
     session_id: str
@@ -98,8 +104,9 @@ def analyze_data_quality(session_id: str):
 
     training_data = sessions[session_id]['training_data']
     testing_data = sessions[session_id].get('testing_data')
+    agent = sessions[session_id]['agent']
 
-    analyzer = DataQualityAnalyzer(df_train=training_data, df_test=testing_data)
+    analyzer = DataQualityAnalyzer(df_train=training_data, df_test=testing_data, llm_interface=agent.llm_interface)
     report = analyzer.analyze()
     return report
 
@@ -176,6 +183,68 @@ def evaluate_performance(session_id: str, request: EvaluationRequest):
     sessions[session_id]['last_report'] = report
     return report
 
+@app.post("/audit/fairness/{session_id}", summary="Perform fairness audit on model predictions")
+async def audit_fairness(
+    session_id: str,
+    request: FairnessAuditRequest
+):
+    """Run fairness audit on the model and data in the session."""
+    if session_id not in sessions:
+        raise HTTPException(status_code=404, detail="Session not found")
+    
+    session = sessions[session_id]
+    model = session.get('model')
+    testing_data = session.get('testing_data')
+    
+    if model is None or testing_data is None:
+        raise HTTPException(
+            status_code=400, 
+            detail="Model and test data are required for fairness audit"
+        )
+    
+    # Extract sensitive features
+    sensitive_cols = [col for col in request.sensitive_columns if col in testing_data.columns]
+    if not sensitive_cols:
+        raise HTTPException(
+            status_code=400,
+            detail="No valid sensitive columns found in test data"
+        )
+    
+    # Get target column (assuming it's the last column, adjust if needed)
+    X_test = testing_data.iloc[:, :-1]
+    y_test = testing_data.iloc[:, -1]
+    
+    # Initialize auditor
+    try:
+        from fairness_bias_auditor import FairnessAndBiasAuditing
+        
+        auditor = FairnessAndBiasAuditing(
+            model=model,
+            X=X_test,
+            y_true=y_test,
+            sensitive_features=X_test[sensitive_cols].values,
+            sensitive_feature_names=sensitive_cols
+        )
+        
+        # Run audit
+        report = auditor.audit_fairness(fairness_threshold=request.fairness_threshold)
+        
+        # Convert report to dict for JSON serialization
+        return {
+            "fairness_metrics": report.overall_metrics,
+            "subgroup_analysis": report.subgroup_analysis,
+            "recommendations": report.recommendations
+        }
+        
+    except ImportError as e:
+        raise HTTPException(
+            status_code=500,
+            detail="Fairness auditing requires fairlearn. Install with: pip install fairlearn"
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+    
 @app.post("/query/", summary="Process a user query on the training dataset")
 def process_query(query: Query):
     if query.session_id not in sessions or 'agent' not in sessions[query.session_id]:
