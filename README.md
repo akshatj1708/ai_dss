@@ -1,151 +1,82 @@
-## 🤖InsightX : Data Analysis Agent 🤖
+# LuminaML 🔍
 
-An intelligent data analysis agent powered by Mixtral-8x7B that helps you analyze datasets, generate visualizations, and provide insights through natural language interaction.
+**The Transparent AI Assurance & Evaluation Framework**
 
-## Key Features ✨
+LuminaML is a sophisticated, modular backend system designed to perform a "360-degree audit" of Machine Learning models and datasets. Unlike standard analysis tools, it integrates **Mistral AI** to provide qualitative insights alongside quantitative metrics, ensuring your AI systems are not only accurate but also fair, robust, and explainable.
 
-- **Natural Language Processing**: Interact with your data using plain English
-- **Intelligent Data Analysis**: Get detailed insights and statistical analysis
-- **Automated Visualization**: Generate charts and graphs based on your queries
-- **Context Management**: Maintains conversation history and dataset context
-- **Session Management**: Save and load analysis sessions
-- **Smart Data Type Inference**: Automatically recommends optimal data types for your datasets
-- **Multi-Format Support**: Process various file types including:
-  - Documents (PDF, DOCX)
-  - Spreadsheets (CSV, Excel)
-  - Images (PNG, JPG)
-  - Text files (TXT)
+---
 
-## Setup 🛠️
+## 🌟 Core Framework Capabilities
 
-1. Clone the repository:
-```bash
-git clone https://github.com/UjjWaL-0911/InsightX-An-AI-Data-Analyst.git
-cd InsightX-An-AI-Data-Analyst
-```
-
-2. Create required directories:(This Repo already contains the folders)
-```bash
-mkdir Graph_Plots Saved_Sessions Datasets Configs
-```
-
-3. Set up environment variables:
-- Create a `.env` file in the `Configs` directory
-- Add your Mistral AI API key:
-```
-MISTRAL_API_KEY=your_api_key_here
-```
-
-4. Install dependencies:
-```bash
-pip install -r requirements.txt
-```
-
-## Project Structure 📁
-
-```
-data-analyst-agent/
-├── Configs/
-│   └── .env
-├── Datasets/
-├── Graph_Plots/
-├── Saved_Sessions/
-├── agent_core.py
-├── file_processor.py
-├── data_preprocessor.py
-├── test_agent.py
-├── app.py
-├── requirements.txt
-└── README.md
-
-```
-
-## Usage 🚀
-
-1. Run the FastAPI backend:
-```bash
-uvicorn app:app --reload
-```
-2. Access the API documentation at [http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs) for a full list of endpoints.
-
-### Full Workflow: Data Quality and Model Evaluation
-
-1.  **Upload Training Data**: Start a new session by uploading a training dataset. This will return a `session_id`.
-    ```bash
-    curl -X POST -F "file=@Datasets/your_training_data.csv" http://127.0.0.1:8000/upload/training/
-    ```
-2.  **Upload Testing Data**: Upload a testing dataset to the same session using the `session_id`.
-    ```bash
-    curl -X POST -F "file=@Datasets/your_testing_data.csv" http://127.0.0.1:8000/upload/testing/{session_id}
-    ```
-3.  **Run Data Quality Analysis**: Get a report on schema, outliers, and distribution drift.
-    ```bash
-    curl -X GET http://127.0.0.1:8000/analyze/quality/{session_id}
-    ```
-4.  **Upload Trained Model**: Upload your trained and serialized (`.pkl`) model to the session.
-    ```bash
-    curl -X POST -F "file=@your_model.pkl" http://127.0.0.1:8000/upload/model/{session_id}
-    ```
-5.  **Evaluate Model Performance**: Trigger the performance evaluation with your desired benchmarks.
-    ```bash
-    curl -X POST -H "Content-Type: application/json" -d '{"model_version": "v1.0", "thresholds": {"accuracy": 0.85, "auc_roc": 0.90}}' http://127.0.0.1:8000/evaluate/performance/{session_id}
-    ```
-
-### Natural Language Queries
-
-You can still ask questions about your training dataset using the `/query/` endpoint.
-```bash
-curl -X POST -H "Content-Type: application/json" -d '{"session_id": "{session_id}", "query": "What is the average price?"}' http://127.0.0.1:8000/query/
-```
-## Supported File Types 📄
-
-The agent can process various file formats:
-
-### Documents
-- PDF files (`.pdf`)
-- Microsoft Word documents (`.docx`)
-
-### Spreadsheets
-- CSV files (`.csv`)
-- Excel files (`.xlsx`, `.xls`)
-
-### Images
-- PNG images (`.png`)
-- JPEG images (`.jpg`, `.jpeg`)
-
-### Text
-- Plain text files (`.txt`)
-
-Each file type is processed appropriately:
-- Documents are parsed for text content and structure
-- Spreadsheets are converted to pandas DataFrames
-- Images are analyzed for visual content
-- Text files are processed for natural language analysis
-
-## Inference Configuration ⚙️
-
-The agent uses Mixtral-8x7B model with the following default parameters:
-- Model: `mistralai/Mixtral-8x7B-Instruct-v0.1`
-- Max Tokens: 1024
-- Temperature: 0.7
-- Top P: 0.7
-- Top K: 50
-- Repetition Penalty: 1.1
-
-## Key Components 🔑
-
-1. **FileProcessor**   : Handles dataset loading and preprocessing
-2. **DataPreprocessor**: Handles data cleaning i.e., missing values,conversion to appropriate datatype,duplicate values
-3. **ContextManager**  : Manages dataset state and conversation history
-4. **LLMInterface**    : Handles communication with the Mixtral-8x7B model
-5. **IntelligentAgent**: Main class that orchestrates the analysis workflow
+The core of the Framework is its ability to perform specific, automated verification tasks. These functions aim to provide an end-to-end workflow for AI assurance.
 
 
-## Contributing 🤝
 
-Contributions are welcome! Please feel free to raise issues and submit a Pull Request.
+[Image of AI model evaluation workflow diagram]
 
-## Acknowledgments 🙏
 
-- Powered by [Mistral AI](https://mistral.ai/) and Mixtral-8x7B
-- Built with Python, pandas,matplotlib and Streamlit 
+### ● Data Quality Analysis
+Performs deep statistical analysis on datasets to detect quality issues. It validates data schemas, identifies outliers, and measures distribution drift between training and testing sets to flag potential data integrity problems before they affect the model.
+
+### ● Model Performance Evaluation
+Calculates and benchmarks a suite of standard performance metrics. For classification models, this includes **AUC-ROC**, **Precision**, **Recall**, **F1-Score**, and **Accuracy**, providing a clear picture of predictive power.
+
+### ● Fairness and Bias Auditing
+Leverages libraries like **Fairlearn** to conduct a quantitative audit for hidden biases. It calculates key fairness metrics such as **Demographic Parity** and **Equalized Odds** across user-defined demographic subgroups to uncover inequitable model behavior.
+
+### ● Robustness and Security Stress-Testing
+Proactively tests model resilience using frameworks like the **Adversarial Robustness Toolbox (ART)**. It generates adversarial examples to probe for vulnerabilities and performs data corruption tests (e.g., injecting noise) to measure how gracefully performance degrades.
+
+### ● Explainability Reporting
+Addresses the "black box" problem by using techniques like **SHAP** and **LIME**. It generates feature importance plots and reports that explain which input features most influenced the model's predictions, providing crucial transparency for debugging and user trust.
+
+---
+
+## 🛠️ System Architecture
+
+LuminaML is built as a modular **FastAPI** application that orchestrates various specialized agents.
+
+| Module | Description |
+| :--- | :--- |
+| **`app.py`** | The REST API Gateway. Manages user sessions and routes requests to specific audit modules. |
+| **`agent_core.py`** | The Intelligence Layer. Manages context and interfaces with **Mistral AI** to interpret complex metrics into human-readable reports. |
+| **`file_processor.py`** | Handles ingestion of CSV, Excel, PDF, DOCX, and Images (via OCR). |
+| **`data_preprocessor.py`** | Cleans data, imputes missing values, and uses LLM logic to infer correct data types. |
+| **`fairness_bias_auditor.py`** | Dedicated module for calculating disparity metrics across sensitive groups. |
+| **`robustness_tester.py`** | Security module that simulates attacks (FGSM, PGD) and noise injection. |
+| **`explainability_reporting.py`** | Wrapper for SHAP/LIME to generate local and global explanations. |
+
+---
+
+## 🚀 Getting Started
+
+### Prerequisites
+* Python 3.9+
+* [Tesseract OCR](https://github.com/tesseract-ocr/tesseract) (required for image data processing)
+* Mistral AI API Key
+
+### Installation
+
+1. **Clone the Repository**
+   ```bash
+   git clone [https://github.com/your-org/lumina-ml.git](https://github.com/your-org/lumina-ml.git)
+   cd lumina-ml
+
+
+## 📊 Feature Descriptions (Integrated)
+
+### ● Data Quality Analysis
+Performs deep statistical analysis on datasets to detect quality issues. It validates data schemas, identifies outliers, and measures distribution drift between training and testing sets to flag potential data integrity problems before they affect the model.
+
+### ● Model Performance Evaluation
+Calculates and benchmarks a suite of standard performance metrics. For classification models, this includes **AUC-ROC**, **Precision**, **Recall**, **F1-Score**, and **Accuracy**, providing a clear picture of predictive power.
+
+### ● Fairness and Bias Auditing
+Leverages libraries like **Fairlearn** to conduct a quantitative audit for hidden biases. It calculates key fairness metrics such as **Demographic Parity** and **Equalized Odds** across user-defined demographic subgroups to uncover inequitable model behavior.
+
+### ● Robustness and Security Stress-Testing
+Proactively tests model resilience using frameworks like the **Adversarial Robustness Toolbox (ART)**. It generates adversarial examples to probe for vulnerabilities and performs data corruption tests (e.g., injecting noise) to measure how gracefully performance degrades.
+
+### ● Explainability Reporting
+Addresses the "black box" problem by using techniques like **SHAP** and **LIME**. It generates feature importance plots and reports that explain which input features most influenced the model's predictions, providing crucial transparency for debugging and user trust.
+
