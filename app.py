@@ -204,7 +204,7 @@ async def handle_query(request: Request):
         logger.error(f"Error processing query: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Error processing query: {str(e)}")
 
-@app.get("/analyze/quality/{session_id}", summary="Perform data quality analysis")
+@app.get("/analyze_quality/{session_id}", summary="Perform data quality analysis")
 def analyze_data_quality(session_id: str):
     if session_id not in sessions or 'training_data' not in sessions[session_id]:
         raise HTTPException(status_code=404, detail="Training data not found.")
@@ -217,7 +217,7 @@ def analyze_data_quality(session_id: str):
     report = analyzer.analyze()
     return report
 
-@app.post("/evaluate/performance/{session_id}", summary="Evaluate model performance")
+@app.post("/evaluate_performance/{session_id}", summary="Evaluate model performance")
 def evaluate_performance(session_id: str, request: EvaluationRequest):
     if session_id not in sessions or 'model' not in sessions[session_id] or 'testing_data' not in sessions[session_id]:
         raise HTTPException(status_code=404, detail="Model or testing data not found for this session.")
@@ -296,7 +296,7 @@ def evaluate_performance(session_id: str, request: EvaluationRequest):
     sessions[session_id]['last_report'] = report
     return report
 
-@app.post("/audit/fairness/{session_id}", response_model=Dict[str, Any])
+@app.post("/audit_fairness/{session_id}", response_model=Dict[str, Any])
 async def audit_fairness(
     session_id: str,
     request: FairnessAuditRequest
@@ -393,7 +393,7 @@ async def audit_fairness(
             detail=f"Error during fairness audit: {str(e)}"
         )
 
-@app.post("/test/robustness/{session_id}", summary="Run robustness and security stress testing")
+@app.post("/test_robustness/{session_id}", summary="Run robustness and security stress testing")
 async def test_model_robustness(session_id: str, request: RobustnessTestRequest):
     """
     Generates adversarial examples and performs noise injection to stress-test the model.
