@@ -61,22 +61,3 @@ LuminaML is built as a modular **FastAPI** application that orchestrates various
    ```bash
    git clone [https://github.com/your-org/lumina-ml.git](https://github.com/your-org/lumina-ml.git)
    cd lumina-ml
-
-
-## 📊 Feature Descriptions (Integrated)
-
-### ● Data Quality Analysis
-Performs deep statistical analysis on datasets to detect quality issues. It validates data schemas, identifies outliers, and measures distribution drift between training and testing sets to flag potential data integrity problems before they affect the model.
-
-### ● Model Performance Evaluation
-Calculates and benchmarks a suite of standard performance metrics. For classification models, this includes **AUC-ROC**, **Precision**, **Recall**, **F1-Score**, and **Accuracy**, providing a clear picture of predictive power.
-
-### ● Fairness and Bias Auditing
-Leverages libraries like **Fairlearn** to conduct a quantitative audit for hidden biases. It calculates key fairness metrics such as **Demographic Parity** and **Equalized Odds** across user-defined demographic subgroups to uncover inequitable model behavior.
-
-### ● Robustness and Security Stress-Testing
-Proactively tests model resilience using frameworks like the **Adversarial Robustness Toolbox (ART)**. It generates adversarial examples to probe for vulnerabilities and performs data corruption tests (e.g., injecting noise) to measure how gracefully performance degrades.
-
-### ● Explainability Reporting
-Addresses the "black box" problem by using techniques like **SHAP** and **LIME**. It generates feature importance plots and reports that explain which input features most influenced the model's predictions, providing crucial transparency for debugging and user trust.
-
