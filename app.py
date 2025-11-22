@@ -1,10 +1,10 @@
 import os
 import uuid
 import pickle
-from fastapi import FastAPI, File, UploadFile, HTTPException,BackgroundTasks,Request
+from fastapi import FastAPI, File, UploadFile, HTTPException, BackgroundTasks, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
-from typing import Dict,List, Optional,Any
+from typing import Dict, List, Optional, Any
 from dotenv import load_dotenv
 from agent_core import IntelligentAgent
 from file_processor import FileProcessor
@@ -12,12 +12,14 @@ from data_preprocessor import DataPreprocessor
 from data_quality_analyzer import DataQualityAnalyzer
 from model_performance_evaluator import ModelPerformanceEvaluator
 import pandas as pd
-from pydantic import BaseModel
 from robustness_tester import RobustnessTester
 from sklearn.base import is_classifier, is_regressor
 from fairness_bias_auditor import FairnessAndBiasAuditing
+from explainability_reporting import ExplainabilityReporting, ExplainabilityReport
 import logging
 import numpy as np
+from datetime import datetime
+import json
 from mistralai.client import MistralClient
 from Configs.config import get_mistral_client, MODEL_NAME
 
@@ -61,6 +63,13 @@ class RobustnessTestRequest(BaseModel):
     eps_values: List[float] = [0.01, 0.05, 0.1]
     noise_levels: List[float] = [0.05, 0.1, 0.2]
     model_type: str = 'sklearn'  # 'sklearn', 'pytorch', 'tensorflow'
+
+class ExplainabilityRequest(BaseModel):
+    instance_indices: List[int] = [0]  # Default to first instance
+    sample_size: int = 100  # For SHAP calculations
+    num_features: int = 5  # For LIME explanations
+    format: str = 'json'  # 'json', 'pdf', or 'all'
+    include_plots: bool = False  # Defaults to False to suppress huge base64 strings in response
 
 def _process_and_store_dataset(session_id: str, file: UploadFile, dataset_type: str):
     file_path = os.path.join("Datasets", file.filename)
@@ -503,3 +512,108 @@ async def test_model_robustness(session_id: str, request: RobustnessTestRequest)
     except Exception as e:
         logger.error(f"Robustness testing failed: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Robustness testing failed: {str(e)}")
+
+@app.post("/explain/{session_id}", response_model=Dict[str, Any])
+async def explain_model(
+    session_id: str,
+    request: ExplainabilityRequest,
+    background_tasks: BackgroundTasks
+):
+    """
+    Generate model explainability report using SHAP and LIME, with LLM-based analysis.
+    
+    Args:
+        session_id: Session ID containing the model and data
+        request: Explainability configuration
+        background_tasks: For running long-running tasks in background
+        
+    Returns:
+        Explainability report with SHAP, LIME, and LLM insights
+    """
+    try:
+        # Get session data
+        if session_id not in sessions:
+            raise HTTPException(status_code=404, detail="Session not found")
+            
+        session = sessions[session_id]
+        model = session.get('model')
+        X_test = session.get('testing_data')
+        agent = session.get('agent')  # Retrieve the agent to use its LLM interface
+        
+        if model is None or X_test is None:
+            raise HTTPException(status_code=400, detail="Model or test data not found in session")
+            
+        # Get feature names
+        if hasattr(X_test, 'columns'):
+            feature_names = X_test.columns.tolist()
+        else:
+            feature_names = [f"feature_{i}" for i in range(X_test.shape[1])]
+            
+        # Determine model type
+        model_type = 'classifier'
+        if hasattr(model, 'predict_proba'):
+            try:
+                # Check if it's a regressor by looking at predict output
+                pred = model.predict(X_test[:1])
+                if len(pred.shape) == 1 and not np.array_equal(pred, pred.astype(bool)):
+                    model_type = 'regressor'
+            except:
+                pass
+                
+        # Initialize explainer
+        explainer = ExplainabilityReporting(
+            model=model,
+            X=X_test,
+            feature_names=feature_names,
+            model_type=model_type
+        )
+        
+        # Generate explanations
+        def generate_report():
+            try:
+                # Compute global feature importance
+                explainer.compute_feature_importance(sample_size=request.sample_size)
+                
+                # Generate local explanations for specified instances
+                for idx in request.instance_indices:
+                    try:
+                        explainer.explain_instance(
+                            instance_idx=idx,
+                            num_features=request.num_features
+                        )
+                    except Exception as e:
+                        logger.error(f"Error explaining instance {idx}: {str(e)}")
+                
+                # LLM Analysis Integration
+                if agent and hasattr(agent, 'llm_interface'):
+                    explainer.analyze_with_llm(agent.llm_interface)
+                
+                # Create reports directory if it doesn't exist
+                os.makedirs('reports/explainability', exist_ok=True)
+                
+                # Generate and save report
+                # Pass the flag from request to control whether plots are returned
+                report = explainer.generate_explanation_report(
+                    output_dir='reports/explainability',
+                    format=request.format,
+                    include_plots=request.include_plots
+                )
+                return report
+            except Exception as e:
+                logger.error(f"Error in explainability report generation: {str(e)}")
+                raise
+        
+        # Run in background if it might take long
+        if len(X_test) > 100 or len(request.instance_indices) > 3:
+            background_tasks.add_task(generate_report)
+            return {
+                "status": "started",
+                "message": "Explainability report generation started in background. Check the reports directory.",
+                "session_id": session_id
+            }
+        else:
+            return generate_report()
+            
+    except Exception as e:
+        logger.error(f"Error in explain endpoint: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error generating explainability report: {str(e)}")
