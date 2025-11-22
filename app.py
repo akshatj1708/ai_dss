@@ -1,7 +1,7 @@
 import os
 import uuid
 import pickle
-from fastapi import FastAPI, File, UploadFile, HTTPException,BackgroundTasks
+from fastapi import FastAPI, File, UploadFile, HTTPException,BackgroundTasks,Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from typing import Dict,List, Optional,Any
@@ -14,9 +14,12 @@ from model_performance_evaluator import ModelPerformanceEvaluator
 import pandas as pd
 from pydantic import BaseModel
 from robustness_tester import RobustnessTester
+from sklearn.base import is_classifier, is_regressor
 from fairness_bias_auditor import FairnessAndBiasAuditing
 import logging
 import numpy as np
+from mistralai.client import MistralClient
+from Configs.config import get_mistral_client, MODEL_NAME
 
 logger = logging.getLogger(__name__)
 
@@ -78,6 +81,11 @@ def _process_and_store_dataset(session_id: str, file: UploadFile, dataset_type: 
     if session_id not in sessions:
         sessions[session_id] = {}
     sessions[session_id][dataset_type] = processed_df
+    if dataset_type == 'training_data':
+        sessions[session_id]['target_column'] = processed_df.columns[-1]
+    elif 'target_column' in sessions[session_id]:
+        target_column = sessions[session_id]['target_column']
+        sessions[session_id]['testing_has_target'] = target_column in processed_df.columns
     sessions[session_id]['agent'] = agent
 
 @app.post("/upload/training/", summary="Upload a training dataset")
@@ -110,6 +118,83 @@ def upload_model(session_id: str, file: UploadFile = File(...)):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error loading model: {str(e)}")
 
+@app.post("/query/")
+async def handle_query(request: Request):
+    """
+    Handle natural language queries about the dataset and model using Mistral AI.
+    """
+    try:
+        # Parse the request body
+        data = await request.json()
+        session_id = data.get('session_id')
+        query = data.get('query')
+        
+        if not session_id or not query:
+            raise HTTPException(status_code=400, detail="Both session_id and query are required")
+            
+        if session_id not in sessions:
+            raise HTTPException(status_code=404, detail="Session not found")
+            
+        session = sessions[session_id]
+        
+        # Initialize Mistral client
+        client = get_mistral_client()
+        
+        # Prepare context from session
+        context = "You are a helpful AI assistant. "
+        
+        if 'training_data' in session:
+            # Add dataset information to context
+            df = session['training_data']
+            context += f"The dataset has {len(df)} rows and {len(df.columns)} columns. "
+            context += f"Columns: {', '.join(df.columns)}. "
+            
+            # Add basic statistics for numeric columns
+            numeric_cols = df.select_dtypes(include=['number']).columns
+            if len(numeric_cols) > 0:
+                context += "Numeric columns with their means: "
+                for col in numeric_cols:
+                    context += f"{col} (mean: {df[col].mean():.2f}), "
+        
+        if 'model' in session:
+            context += "There is a trained model available. "
+            model_type = type(session['model']).__name__
+            context += f"Model type: {model_type}. "
+        
+        # Add the user's query
+        messages = [
+            {"role": "system", "content": context},
+            {"role": "user", "content": query}
+        ]
+        
+        # Get response from Mistral
+        response = client.chat(
+            model=MODEL_NAME,
+            messages=messages,
+            temperature=0.7,
+            max_tokens=1024
+        )
+        
+        # Format the response
+        result = {
+            "query": query,
+            "response": response.choices[0].message.content,
+            "session_id": session_id,
+            "model": MODEL_NAME
+        }
+        
+        # Add metadata if available
+        if 'training_data' in session:
+            result["dataset_columns"] = session['training_data'].columns.tolist()
+            
+        return result
+        
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=400, detail="Invalid JSON in request body")
+    except Exception as e:
+        logger.error(f"Error processing query: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Error processing query: {str(e)}")
+
 @app.get("/analyze/quality/{session_id}", summary="Perform data quality analysis")
 def analyze_data_quality(session_id: str):
     if session_id not in sessions or 'training_data' not in sessions[session_id]:
@@ -119,7 +204,7 @@ def analyze_data_quality(session_id: str):
     testing_data = sessions[session_id].get('testing_data')
     agent = sessions[session_id]['agent']
 
-    analyzer = DataQualityAnalyzer(df_train=training_data, df_test=testing_data, llm_interface=agent.llm_interface)
+    analyzer = DataQualityAnalyzer(df_train=training_data, df_test=testing_data)
     report = analyzer.analyze()
     return report
 
@@ -131,65 +216,71 @@ def evaluate_performance(session_id: str, request: EvaluationRequest):
     model = sessions[session_id]['model']
     testing_data = sessions[session_id]['testing_data']
     agent = sessions[session_id]['agent']
+    session = sessions[session_id]
 
-    # Preprocess the testing data to match training format exactly
-    # Training script only applies one-hot encoding, no DataPreprocessor
-    testing_data_clean = testing_data.copy()
-    
-    # Convert category dtypes back to object for get_dummies to work
-    for col in testing_data_clean.columns:
-        if testing_data_clean[col].dtype.name == 'category':
-            testing_data_clean[col] = testing_data_clean[col].astype('object')
-    
-    # Debug: Print testing data columns before encoding
-    print(f"Testing data columns before encoding: {testing_data_clean.columns.tolist()}")
-    
-    # Apply the same one-hot encoding as training script
-    categorical_cols = testing_data_clean.select_dtypes(include=['object']).columns
-    testing_data_encoded = pd.get_dummies(testing_data_clean, columns=categorical_cols, drop_first=True, dtype=int)
-    
-    # Debug: Print testing data columns after encoding
-    print(f"Testing data columns after encoding: {testing_data_encoded.columns.tolist()}")
-    
-    # Load the training data to get the expected columns
+    # Preprocess the testing and training datasets to ensure consistent types
     training_data = sessions[session_id]['training_data']
-    
-    # Convert category dtypes back to object for training data too
+    testing_data_clean = testing_data.copy()
     training_data_clean = training_data.copy()
-    for col in training_data_clean.columns:
-        if training_data_clean[col].dtype.name == 'category':
-            training_data_clean[col] = training_data_clean[col].astype('object')
-    
-    # Debug: Print training data columns before encoding
-    print(f"Training data columns before encoding: {training_data_clean.columns.tolist()}")
-    
-    # Re-process training data with the same encoding to get expected columns
-    categorical_cols_train = training_data_clean.select_dtypes(include=['object']).columns
-    training_data_encoded = pd.get_dummies(training_data_clean, columns=categorical_cols_train, drop_first=True, dtype=int)
-    
-    # Debug: Print training data columns after encoding
-    print(f"Training data columns after encoding: {training_data_encoded.columns.tolist()}")
-    
-    # Get expected feature columns (excluding target)
-    expected_features = training_data_encoded.drop('price', axis=1).columns
-    
-    # Debug: Print expected features
-    print(f"Expected features: {expected_features.tolist()}")
-    
-    # Add missing columns to testing data with 0 values
-    for col in expected_features:
-        if col not in testing_data_encoded.columns:
-            testing_data_encoded[col] = 0
-    
-    # Ensure same column order plus target
-    testing_data_encoded = testing_data_encoded[expected_features.tolist() + ['price']]
-    
-    # Debug: Print final testing data columns
-    print(f"Final testing data columns: {testing_data_encoded.columns.tolist()}")
-    
-    # Assuming the last column is the target variable
-    X_test = testing_data_encoded.iloc[:, :-1]
-    y_test = testing_data_encoded.iloc[:, -1]
+
+    for dataset in (training_data_clean, testing_data_clean):
+        for col in dataset.columns:
+            if dataset[col].dtype.name == 'category':
+                dataset[col] = dataset[col].astype('object')
+
+    # Determine target column (default to last column) and persist if missing
+    target_column = session.get('target_column')
+    if not target_column:
+        target_column = training_data_clean.columns[-1]
+        session['target_column'] = target_column
+
+    if target_column not in training_data_clean.columns:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Target column '{target_column}' is missing from the training dataset."
+        )
+
+    is_pipeline = hasattr(model, "steps")
+
+    if is_pipeline:
+        feature_columns = training_data_clean.drop(columns=[target_column]).columns
+        missing_features = set(feature_columns) - set(testing_data_clean.columns)
+        if missing_features:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Testing dataset is missing columns required by the pipeline: {sorted(missing_features)}"
+            )
+        X_test = testing_data_clean[feature_columns]
+        y_test = testing_data_clean[target_column]
+    else:
+        # Apply the same one-hot encoding that was used for the standalone model
+        categorical_cols_test = testing_data_clean.select_dtypes(include=['object']).columns
+        testing_data_encoded = pd.get_dummies(testing_data_clean, columns=categorical_cols_test, drop_first=True, dtype=int)
+
+        categorical_cols_train = training_data_clean.select_dtypes(include=['object']).columns
+        training_data_encoded = pd.get_dummies(training_data_clean, columns=categorical_cols_train, drop_first=True, dtype=int)
+
+        if target_column not in training_data_encoded.columns:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Target column '{target_column}' is missing from the encoded training data."
+            )
+
+        expected_features = training_data_encoded.drop(columns=[target_column]).columns
+
+        for col in expected_features:
+            if col not in testing_data_encoded.columns:
+                testing_data_encoded[col] = 0
+
+        if target_column not in testing_data_encoded.columns:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Target column '{target_column}' is missing from the encoded testing data."
+            )
+
+        testing_data_encoded = testing_data_encoded[expected_features.tolist() + [target_column]]
+        X_test = testing_data_encoded[expected_features]
+        y_test = testing_data_encoded[target_column]
 
     evaluator = ModelPerformanceEvaluator(model, X_test, y_test, agent.llm_interface)
     report = evaluator.generate_performance_report(request.model_version, request.thresholds)
@@ -293,120 +384,122 @@ async def audit_fairness(
             detail=f"Error during fairness audit: {str(e)}"
         )
 
-@app.post("/test/robustness/{session_id}")
-async def test_robustness(
-    session_id: str,
-    request: RobustnessTestRequest,
-    background_tasks: BackgroundTasks
-):
-    try:
-        if session_id not in sessions:
-            raise HTTPException(status_code=404, detail="Session not found")
-        
-        session = sessions[session_id]
-        model = session.get('model')
-        X_test = session.get('testing_data')
-        preprocessor = session.get('preprocessor')
-        
-        if model is None or X_test is None:
-            raise HTTPException(status_code=400, detail="Model or test data not found in session")
-        
+@app.post("/test/robustness/{session_id}", summary="Run robustness and security stress testing")
+async def test_model_robustness(session_id: str, request: RobustnessTestRequest):
+    """
+    Generates adversarial examples and performs noise injection to stress-test the model.
+    Handles Scikit-Learn Pipelines by testing the underlying estimator on transformed data.
+    """
+    if session_id not in sessions:
+        raise HTTPException(status_code=404, detail="Session not found.")
+    
+    session = sessions[session_id]
+    
+    # 1. Validate Assets
+    if 'model' not in session:
+        raise HTTPException(status_code=400, detail="Model not uploaded.")
+    if 'testing_data' not in session:
+        raise HTTPException(status_code=400, detail="Testing data not uploaded.")
+
+    model = session['model']
+    testing_data = session['testing_data'].copy()
+    
+    # 2. Prepare X (Features) and y (Target)
+    target_column = session.get('target_column')
+    if not target_column:
+        target_column = testing_data.columns[-1]
+        session['target_column'] = target_column
+
+    if target_column not in testing_data.columns:
+        raise HTTPException(status_code=400, detail=f"Target column '{target_column}' not found.")
+
+    # Separate Features and Target
+    X_raw = testing_data.drop(columns=[target_column])
+    y_test = testing_data[target_column]
+
+    # 3. Handle Pipelines vs Standalone Models
+    # ART requires numeric input. If it's a pipeline, we must preprocess the data first.
+    is_pipeline = hasattr(model, "steps") or hasattr(model, "named_steps")
+
+    if is_pipeline:
         try:
-            # Get target column from session or use the last column as default
-            target_column = session.get('target_column', X_test.columns[-1])
-            y_test = X_test[target_column].values
-            X_test = X_test.drop(columns=[target_column])
+            # Split Pipeline: Preprocessor (all steps except last) -> Estimator (last step)
+            preprocessor = model[:-1]
+            final_estimator = model[-1]
             
-            logger.info(f"Raw test data columns: {X_test.columns.tolist()}")
-            logger.info(f"Raw test data shape: {X_test.shape}")
+            # Transform data to numeric format (OneHotEncoding/Scaling happens here)
+            X_numeric = preprocessor.transform(X_raw)
             
-            # Apply the same preprocessing used during training
-            if preprocessor is not None:
-                try:
-                    # Get the expected feature names from the preprocessor
-                    if hasattr(preprocessor, 'get_feature_names_out'):
-                        expected_features = preprocessor.get_feature_names_out()
-                        logger.info(f"Preprocessor expects features: {expected_features.tolist()}")
-                    
-                    # Get the actual features in the test data
-                    actual_features = X_test.columns.tolist()
-                    logger.info(f"Actual features: {actual_features}")
-                    
-                    # If the model is a pipeline, get the preprocessor from the pipeline
-                    if hasattr(model, 'steps'):
-                        for name, step in model.steps:
-                            if hasattr(step, 'transform') and hasattr(step, 'fit_transform'):
-                                preprocessor = step
-                                logger.info(f"Found preprocessor in model pipeline: {name}")
-                                break
-                    
-                    # Transform the test data
-                    X_test_processed = preprocessor.transform(X_test)
-                    logger.info(f"Preprocessed test data shape: {getattr(X_test_processed, 'shape', 'N/A')}")
-                    
-                except Exception as e:
-                    logger.error(f"Error during preprocessing: {str(e)}", exc_info=True)
-                    if hasattr(preprocessor, 'get_feature_names_out'):
-                        logger.error(f"Expected features: {preprocessor.get_feature_names_out().tolist()}")
-                    logger.error(f"Actual features: {X_test.columns.tolist()}")
-                    if hasattr(preprocessor, 'transformers_'):
-                        for name, transformer, columns in preprocessor.transformers_:
-                            logger.error(f"Transformer '{name}' processes columns: {columns}")
-                    raise ValueError(
-                        f"Preprocessing failed: {str(e)}\n"
-                        f"Expected {getattr(preprocessor, 'n_features_in_', 'unknown')} features, got {X_test.shape[1]}\n"
-                        f"Input columns: {X_test.columns.tolist()}"
-                    )
+            # Handle Sparse Matrices (if OneHotEncoder produces sparse output)
+            if hasattr(X_numeric, "toarray"):
+                X_numeric = X_numeric.toarray()
                 
-                # If we have a sparse matrix, convert to dense for ART
-                if hasattr(X_test_processed, 'toarray'):
-                    X_test_processed = X_test_processed.toarray()
-            else:
-                # Fallback: Use the model's predict method directly if no preprocessor is available
-                X_test_processed = X_test.values
-                logger.info(f"Using raw test data (no preprocessor): {X_test_processed.shape}")
-            
-            # Get feature ranges for scaling
-            if hasattr(X_test_processed, 'shape'):
-                logger.info(f"Final test data shape: {X_test_processed.shape}")
-                if isinstance(X_test_processed, np.ndarray):
-                    feature_ranges = (float(np.nanmin(X_test_processed)), 
-                                    float(np.nanmax(X_test_processed)))
-                elif hasattr(X_test_processed, 'min') and hasattr(X_test_processed, 'max'):
-                    feature_ranges = (float(X_test_processed.min().min()), 
-                                    float(X_test_processed.max().max()))
-                else:
-                    feature_ranges = (0.0, 1.0)
-            else:
-                feature_ranges = (0.0, 1.0)
-                
-            # Initialize robustness tester with task_type from request
-            tester = RobustnessTester(
-                model=model,
-                X_test=X_test_processed,
-                y_test=y_test,
-                model_type='sklearn',
-                task_type=request.model_type,
-                feature_ranges=feature_ranges
-            )
-            
-            # Run robustness tests
-            report = tester.measure_robustness(
-                attack_types=request.attack_types,
-                noise_types=request.noise_types,
-                noise_levels=request.noise_levels
-            )
-            
-            # Convert NumPy types to native Python types for JSON serialization
-            report_dict = convert_numpy_types(report.__dict__)
-            return report_dict
+            # Use the numeric data and the final mathematical model
+            model_to_test = final_estimator
+            X_test = X_numeric
             
         except Exception as e:
-            logger.error(f"Error during robustness testing: {str(e)}", exc_info=True)
-            raise HTTPException(status_code=500, detail=f"Error during robustness testing: {str(e)}")
-            
-    except HTTPException:
-        raise
+            raise HTTPException(status_code=400, detail=f"Failed to decompose pipeline for robustness testing: {str(e)}")
+    else:
+        # If not a pipeline, we assume data is already numeric or model handles it
+        # (But for robustness, it essentially must be numeric)
+        # We'll try to convert X_raw to numeric, usually by encoding if training data is available
+        if 'training_data' in session:
+            # ... (Reuse the encoding logic from previous answer if needed, 
+            # but simpler to rely on the Pipeline logic above for your specific case)
+            pass 
+        
+        # Fallback: Assume data is numeric. If it has strings, this will fail again, 
+        # but standard models usually require numeric input anyway.
+        X_test = X_raw
+        model_to_test = model
+
+    # 4. Determine Task Type
+    task_type = "classification"
+    if is_regressor(model_to_test):
+        task_type = "regression"
+    elif is_classifier(model_to_test):
+        task_type = "classification"
+    else:
+        # Fallback check on target variable
+        if pd.api.types.is_numeric_dtype(y_test) and len(np.unique(y_test)) > 20:
+             task_type = "regression"
+
+    # 5. Execute Robustness Test
+    try:
+        tester = RobustnessTester(
+            model=model_to_test,
+            X_test=X_test,
+            y_test=y_test,
+            model_type=request.model_type,
+            task_type=task_type
+        )
+
+        report = tester.measure_robustness(
+            attack_types=request.attack_types,
+            noise_types=request.noise_types,
+            eps_values=request.eps_values,
+            noise_levels=request.noise_levels
+        )
+
+        # 6. Serialize Output
+        def convert_numpy(obj):
+            if isinstance(obj, (np.integer, int)):
+                return int(obj)
+            elif isinstance(obj, (np.floating, float)):
+                return float(obj)
+            elif isinstance(obj, np.ndarray):
+                return obj.tolist()
+            elif isinstance(obj, dict):
+                return {k: convert_numpy(v) for k, v in obj.items()}
+            elif isinstance(obj, list):
+                return [convert_numpy(i) for i in obj]
+            elif hasattr(obj, '__dict__'): 
+                return convert_numpy(obj.__dict__)
+            return obj
+
+        return JSONResponse(content=convert_numpy(report))
+
     except Exception as e:
-        logger.error(f"Unexpected error in test_robustness: {str(e)}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"An unexpected error occurred: {str(e)}")
+        logger.error(f"Robustness testing failed: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Robustness testing failed: {str(e)}")
